@@ -34,16 +34,16 @@ func TestCleanup(t *testing.T) {
 
 func TestDifferentDirs(t *testing.T) {
 	tmp, err := tempclean.TempFile("xx", "asdf")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	os.Mkdir("xx", 0777)
-	tmp, err = tempclean.TempFile("xx", "asdf")
 	if err != nil {
 		t.Fatal("expected error")
 	}
 
-	tmp2, err := tempclean.TempFile("", "asdf")
+	d, err := tempclean.TempDir("", "yy")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmp2, err := d.TempFile("prefix", "suffix")
 	if err != nil {
 		t.Fatal(err)
 	}
