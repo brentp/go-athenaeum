@@ -3,43 +3,82 @@ Like ioutil.TempFile/TempDir, but clean up files at exit.
 If you don't use `log.Fatal`, this should cleanup tempfiles as they go out of scope
 and clean up directories at exit, even when there is an error.
 
+**NOTE** if you want this libary to clean up, you can not use `os.Exit()` or
+`log.Fatal`. use panic() or `tempclean.Exit` or `tempclean.Fatalf` instead.
+
 ```Go
 package main
 
 import (
 	"log"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/brentp/go-athenaeum/tempclean"
 )
+
+// global tmpDir to be used by the program.
+var tmpDir *tempclean.TmpDir
+
+func init() {
+	var err error
+	tmpDir, err = tempclean.TempDir("", "mycustomdir")
+	if err != nil {
+		panic(err)
+	}
+
+}
 
 func main() {
 
 	// required in main())
 	defer tempclean.Cleanup()
+	var tmp *os.File
+	var err error
 
-	tmp, err := tempclean.TempFile("", "asdf")
+	// create tempfiles in a subdirecotry of the default TMPDIR
+	tmp, err = tempclean.TempFile("lumpy-smoother", ".vcf.gz")
+
+	tmp, err = tempclean.TempFile("prefix", "suffix")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	tmp2, err := tempclean.TempFile("", "adsf")
+	tmp2, err := tempclean.TempFile("aprefix", "asuffix")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	if filepath.Dir(tmp.Name()) != filepath.Dir(tmp2.Name()) {
-		log.Fatal("expected same path")
+		log.Fatal("expected same path", tmp.Name(), " ", tmp2.Name())
 	}
 
-	tmpD, err := tempclean.TempFile("relative", "asdf")
+	// can also create a tmp sub-directory and make files inside of it:
+	tmpD, err := tempclean.TempDir("./", "asdf")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	if filepath.Dir(tmpD.Name()) != "relative" {
-		log.Fatal(filepath.Dir(tmpD.Name()))
+	tmpF, err := tmpD.TempFile("my-file-prefix", ".txt")
+	if err != nil {
+		log.Fatal(err)
 	}
+
+	if !strings.HasSuffix(tmpF.Name(), ".txt") {
+		panic("expected .txt suffix, got:" + tmpF.Name())
+	}
+
+	f, err := tmpDir.TempFile("prefix", ".suffix.txt")
+	if err != nil {
+		panic(err)
+	}
+	if !strings.HasSuffix(f.Name(), ".txt") {
+		panic("expected .txt suffix, got:" + tmpF.Name())
+	}
+
+	log.Println(f.Name())
+
 	// note that we can't recover a log.Fatal, but can still get a panic
 	// YES
 	panic("i can still cleanup")

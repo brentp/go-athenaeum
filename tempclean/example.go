@@ -11,6 +11,17 @@ import (
 	"github.com/brentp/go-athenaeum/tempclean"
 )
 
+var tmpDir *tempclean.TmpDir
+
+func init() {
+	var err error
+	tmpDir, err = tempclean.TempDir("", "mycustomdir")
+	if err != nil {
+		panic(err)
+	}
+
+}
+
 func main() {
 
 	// required in main())
@@ -49,6 +60,16 @@ func main() {
 	if !strings.HasSuffix(tmpF.Name(), ".txt") {
 		panic("expected .txt suffix, got:" + tmpF.Name())
 	}
+
+	f, err := tmpDir.TempFile("prefix", ".suffix.txt")
+	if err != nil {
+		panic(err)
+	}
+	if !strings.HasSuffix(f.Name(), ".txt") {
+		panic("expected .txt suffix, got:" + tmpF.Name())
+	}
+
+	log.Println(f.Name())
 
 	// note that we can't recover a log.Fatal, but can still get a panic
 	// YES

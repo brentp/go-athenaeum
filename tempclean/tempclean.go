@@ -54,6 +54,18 @@ func init() {
 
 }
 
+// Exit the program after cleaning up.
+func Exit(code int) {
+	cleanup()
+	os.Exit(code)
+}
+
+// Fatalf calls log.Fatalf after cleaning up.
+func Fatalf(pattern string, args ...interface{}) {
+	cleanup()
+	log.Fatalf(pattern, args...)
+}
+
 // Cleanup must be called via defer inside of main.
 // func main() {
 //    defer tempclean.Cleanup()
