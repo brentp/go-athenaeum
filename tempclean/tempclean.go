@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"sync"
 	"syscall"
@@ -136,10 +135,8 @@ func TempFile(prefix, suffix string) (f *os.File, err error) {
 
 // TempFile creates a new temp file in the directory.
 func (t *TmpDir) TempFile(prefix, suffix string) (f *os.File, err error) {
-	log.Println("prefix:", prefix, " path:", t.path)
 	f, err = iTempFile(t.path, prefix, suffix)
 	if err == nil {
-		runtime.SetFinalizer(f, rm)
 		t.files = append(t.files, f.Name())
 	}
 	return f, err
