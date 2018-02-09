@@ -213,8 +213,8 @@ func (p *Pool) checkRunning() int {
 				if err := proc.c.Wait(); err != nil {
 					log.Println(err)
 				}
-				used = append(used, i)
 			}
+			used = append(used, i)
 		}
 	}
 	if len(used) != 0 {
@@ -343,5 +343,5 @@ func (p *process) finished() bool {
 		return false
 	}
 	log.Println(err)
-	return true
+	return strings.Contains(strings.ToLower(err.Error()), "already finished")
 }
