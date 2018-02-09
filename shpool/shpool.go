@@ -210,8 +210,11 @@ func (p *Pool) checkRunning() int {
 					p.KillAll()
 					return -1
 				}
+				if err := proc.c.Wait(); err != nil {
+					log.Println(err)
+				}
+				used = append(used, i)
 			}
-			used = append(used, i)
 		}
 	}
 	if len(used) != 0 {
@@ -225,7 +228,6 @@ func (p *Pool) checkRunning() int {
 
 	}
 	return p.totalCpus - p.runningCpus
-
 }
 
 // returns true if there are no waiting or running processes
@@ -341,5 +343,5 @@ func (p *process) finished() bool {
 		return false
 	}
 	log.Println(err)
-	return strings.Contains(strings.ToLower(err.Error()), "already finished")
+	return true
 }
