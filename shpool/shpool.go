@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/brentp/go-athenaeum/tempclean"
@@ -36,6 +35,7 @@ type process struct {
 	p     Process
 	c     *exec.Cmd
 	start time.Time
+	err   error
 }
 
 // wrap log.Logger so we can implement Write
@@ -52,10 +52,12 @@ func (l wlogger) Write(b []byte) (int, error) {
 // Pool orchestrates the work to be done.
 type Pool struct {
 	mu               *sync.RWMutex
-	runningProcesses []*process
 	waitingProcesses []*process
+	poller           chan *process
 	runningCpus      int
 	totalCpus        int
+	workerWg         *sync.WaitGroup
+	waiterWg         *sync.WaitGroup
 	start            time.Time
 	err              error
 	logger           wlogger
@@ -75,8 +77,10 @@ type Options struct {
 // with the given prefix.
 func New(cpus int, logger *log.Logger, opts *Options) *Pool {
 	p := &Pool{mu: &sync.RWMutex{},
-		runningProcesses: make([]*process, 0, 16),
 		waitingProcesses: make([]*process, 0, 16),
+		poller:           make(chan *process, cpus),
+		workerWg:         &sync.WaitGroup{},
+		waiterWg:         &sync.WaitGroup{},
 		runningCpus:      0, totalCpus: cpus,
 		start:   time.Now(),
 		options: opts,
@@ -87,13 +91,7 @@ func New(cpus int, logger *log.Logger, opts *Options) *Pool {
 	} else {
 		p.logger = wlogger{&sync.Mutex{}, logger}
 	}
-	// this leaks a goroutine for every New().
-	go func() {
-		ticker := time.NewTicker(time.Second * 5)
-		for _ = range ticker.C {
-			p.check()
-		}
-	}()
+	go p.poll()
 	return p
 }
 
@@ -149,6 +147,7 @@ var yellow = color.New(color.BgYellow).Add(color.Bold).SprintfFunc()
 
 func (p *process) submit(pool *Pool) error {
 	var t *os.File
+	pool.workerWg.Add(1)
 	if len(p.p.Command) < 8192 {
 		p.c = exec.Command(Shell, "-c", p.p.Command)
 	} else {
@@ -174,84 +173,62 @@ func (p *process) submit(pool *Pool) error {
 	}
 	// todo copy gargs kill setup.
 	p.start = time.Now()
-	v := p.c.Start()
-	log.Println("starting:", p.c.ProcessState)
-	return v
+	err := p.c.Start()
+	go func() {
+		// wait in the background and notify the poller.
+		p.err = p.c.Wait()
+		pool.poller <- p
+	}()
+	return err
 }
 
-// checkRunning clears values from runningProcesses and returns
-// an int indicating available capacity in the pool.
-func (p *Pool) checkRunning() int {
-	p.mu.RLock()
-	if len(p.runningProcesses) == 0 {
-		p.mu.RUnlock()
-		return p.totalCpus - p.runningCpus
+func (pool *Pool) checkErr(p *process) {
+	if p.err == nil {
+		return
 	}
-	p.mu.RUnlock()
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	pool.err = p.err
 
-	var used []int
-
-	for i, proc := range p.runningProcesses {
-		if proc.finished() {
-			if !p.options.Quiet {
-				rt := time.Since(proc.start)
-				cmd := proc.p.Command
-				if len(cmd) > 100 {
-					cmd = cmd[0:100]
-				}
-				p.logger.Printf("finished process: %s (%s) in %s", proc.p.Prefix, cmd, rt)
-			}
-			if err := proc.c.Wait(); err != nil {
-				p.logger.Printf("error running command: %s -> %s", proc.p.Command, err)
-				p.err = err
-				if p.options.StopOnError {
-					p.KillAll()
-					return -1
-				}
-				if err := proc.c.Wait(); err != nil {
-					log.Println(err)
-				}
-			}
-			used = append(used, i)
-		}
+	pool.logger.Printf("error running command: %s -> %s", p.p.Command, p.err)
+	if pool.options.StopOnError {
+		pool.KillAll()
+		close(pool.poller)
 	}
-	if len(used) != 0 {
-		sort.Reverse(sort.IntSlice(used))
-		for _, i := range used {
-			proc := p.runningProcesses[i]
-			// TODO: report total time running here.
-			p.runningCpus -= proc.p.CPUs
-			p.runningProcesses = append(p.runningProcesses[:i], p.runningProcesses[i+1:]...)
-		}
-
-	}
-	return p.totalCpus - p.runningCpus
 }
 
-// returns true if there are no waiting or running processes
-func (p *Pool) checkWaiting() bool {
-	p.mu.RLock()
+func (pool *Pool) poll() {
+	for p := range pool.poller {
+		if !pool.options.Quiet {
+			rt := time.Since(p.start)
+			cmd := p.p.Command
+			if len(cmd) > 100 {
+				cmd = cmd[0:100]
+			}
+			pool.logger.Printf("finished process: %s (%s) in %s", p.p.Prefix, cmd, rt)
+		}
+		pool.mu.Lock()
 
-	if p.totalCpus-p.runningCpus == 0 {
-		p.mu.RUnlock()
-		return false
+		pool.runningCpus -= p.p.CPUs
+		pool.checkErr(p)
+		pool.workerWg.Done()
+
+		pool.sendWaiting()
+		log.Println(pool.runningCpus)
+		pool.mu.Unlock()
+	}
+}
+
+// try to run more processes.
+// must be called in a lock
+func (pool *Pool) sendWaiting() {
+
+	if len(pool.waitingProcesses) == 0 {
+		return
 	}
 
-	if len(p.waitingProcesses) == 0 && len(p.runningProcesses) == 0 {
-		p.mu.RUnlock()
-		return true
-	}
-
-	p.mu.RUnlock()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	available := p.totalCpus - p.runningCpus
+	available := pool.totalCpus - pool.runningCpus
 	var used []int
 
-	for i, w := range p.waitingProcesses {
+	for i, w := range pool.waitingProcesses {
 		if w.p.CPUs > available {
 			continue
 		}
@@ -260,56 +237,40 @@ func (p *Pool) checkWaiting() bool {
 
 	}
 	if len(used) != 0 {
-		sort.Reverse(sort.IntSlice(used))
+		sort.Slice(used, func(i, j int) bool { return used[i] > used[j] })
 		for _, i := range used {
-			proc := p.waitingProcesses[i]
-			if err := proc.submit(p); err != nil {
-				p.err = err
+			proc := pool.waitingProcesses[i]
+			if err := proc.submit(pool); err != nil {
+				pool.checkErr(proc)
 			}
-			p.runningProcesses = append(p.runningProcesses, proc)
-			p.waitingProcesses = append(p.waitingProcesses[:i], p.waitingProcesses[i+1:]...)
+			pool.runningCpus += proc.p.CPUs
+			pool.waiterWg.Done()
+			pool.waitingProcesses = append(pool.waitingProcesses[:i], pool.waitingProcesses[i+1:]...)
 		}
 	}
-	return false
-
-}
-
-// check returns true if there are no processes running or waiting.
-func (p *Pool) check() bool {
-	if available := p.checkRunning(); available > 0 {
-		return p.checkWaiting()
-	}
-	return false
 }
 
 // Wait until all processes are finished.
 func (pool *Pool) Wait() error {
-	if pool.check() {
-		pool.logger.Printf("finished all processes after: %s seconds", time.Now().Sub(pool.start))
-		return pool.err
-	}
-
-	ticker := time.NewTicker(time.Second * 3)
-	for t := range ticker.C {
-		if pool.check() {
-			pool.logger.Printf("finished all processes after: %s seconds", t.Sub(pool.start))
-			ticker.Stop()
-			return pool.err
-		}
-	}
-	return nil
+	pool.waiterWg.Wait()
+	pool.workerWg.Wait()
+	return pool.err
 }
 
 // Add a process to the pool.
 func (pool *Pool) Add(p Process) {
+	if p.CPUs > pool.totalCpus {
+		panic("shpool: cant handle a process with more cpus than the pool")
+	}
 	pool.mu.Lock()
+	defer pool.mu.Unlock()
 	if p.CPUs == 0 {
 		p.CPUs = 1
 	}
 	pr := process{p: p}
+	pool.waiterWg.Add(1)
 	pool.waitingProcesses = append(pool.waitingProcesses, &pr)
-	pool.mu.Unlock()
-	pool.check()
+	pool.sendWaiting()
 }
 
 // Error returns any error in the pool
@@ -321,27 +282,6 @@ func (pool *Pool) Error() error {
 func (pool *Pool) KillAll() {
 	pool.mu.Lock()
 	pool.waitingProcesses = pool.waitingProcesses[:0]
-
-	for _, proc := range pool.runningProcesses {
-		pool.logger.Print(proc.c.Process.Kill())
-	}
-
+	// TODO: kill running processes.
 	pool.mu.Unlock()
-}
-
-func (p *process) finished() bool {
-	log.Println(p.c.ProcessState)
-
-	proc, err := os.FindProcess(int(p.c.Process.Pid))
-	//log.Println(proc, err)
-	if err != nil {
-		return false
-	}
-	err = proc.Signal(syscall.Signal(0))
-	//log.Println(err)
-	if err == nil {
-		return false
-	}
-	log.Println(err)
-	return strings.Contains(strings.ToLower(err.Error()), "already finished")
 }
