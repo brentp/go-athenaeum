@@ -2,6 +2,7 @@
 package shpool
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -32,10 +33,9 @@ type Process struct {
 }
 
 type process struct {
-	p     Process
-	c     *exec.Cmd
-	start time.Time
-	err   error
+	p   Process
+	c   *exec.Cmd
+	err error
 }
 
 // wrap log.Logger so we can implement Write
@@ -62,6 +62,8 @@ type Pool struct {
 	err              error
 	logger           wlogger
 	options          *Options
+	ctx              context.Context
+	cancel           context.CancelFunc
 }
 
 type Options struct {
@@ -76,14 +78,18 @@ type Options struct {
 // New creates a new pool with either the specified logger, or a logger
 // with the given prefix.
 func New(cpus int, logger *log.Logger, opts *Options) *Pool {
+	ctx, cancel := context.WithCancel(context.Background())
 	p := &Pool{mu: &sync.RWMutex{},
 		waitingProcesses: make([]*process, 0, 16),
 		poller:           make(chan *process, cpus),
 		workerWg:         &sync.WaitGroup{},
 		waiterWg:         &sync.WaitGroup{},
-		runningCpus:      0, totalCpus: cpus,
-		start:   time.Now(),
-		options: opts,
+		runningCpus:      0,
+		totalCpus:        cpus,
+		ctx:              ctx,
+		cancel:           cancel,
+		start:            time.Now(),
+		options:          opts,
 	}
 	if logger == nil {
 		logPrefix := strings.TrimLeft(strings.TrimSpace(opts.LogPrefix)+": ", ": ")
@@ -149,8 +155,9 @@ func (p *process) submit(pool *Pool) error {
 	var t *os.File
 	pool.workerWg.Add(1)
 	if len(p.p.Command) < 8192 {
-		p.c = exec.Command(Shell, "-c", p.p.Command)
+		p.c = exec.CommandContext(pool.ctx, Shell, "-c", p.p.Command)
 	} else {
+		// use a temp file for large files.
 		var err error
 		t, err = tempclean.TempFile(p.p.Prefix, ".sh")
 		if err != nil {
@@ -172,12 +179,13 @@ func (p *process) submit(pool *Pool) error {
 		defer os.Remove(t.Name())
 	}
 	// todo copy gargs kill setup.
-	p.start = time.Now()
 	err := p.c.Start()
 	go func() {
 		// wait in the background and notify the poller.
 		p.err = p.c.Wait()
-		pool.poller <- p
+		if e := pool.ctx.Err(); e == nil {
+			pool.poller <- p
+		}
 	}()
 	return err
 }
@@ -198,21 +206,27 @@ func (pool *Pool) checkErr(p *process) {
 func (pool *Pool) poll() {
 	for p := range pool.poller {
 		if !pool.options.Quiet {
-			rt := time.Since(p.start)
+			ut := p.c.ProcessState.UserTime()
+			st := p.c.ProcessState.SystemTime()
 			cmd := p.p.Command
 			if len(cmd) > 100 {
 				cmd = cmd[0:100]
 			}
-			pool.logger.Printf("finished process: %s (%s) in %s", p.p.Prefix, cmd, rt)
+			pool.logger.Printf("finished process: %s (%s) in user-time:%s system-time:%s", p.p.Prefix, cmd, ut, st)
 		}
 		pool.mu.Lock()
+
+		select {
+		case <-pool.ctx.Done():
+			break
+		default:
+		}
 
 		pool.runningCpus -= p.p.CPUs
 		pool.checkErr(p)
 		pool.workerWg.Done()
 
 		pool.sendWaiting()
-		log.Println(pool.runningCpus)
 		pool.mu.Unlock()
 	}
 }
@@ -282,6 +296,10 @@ func (pool *Pool) Error() error {
 func (pool *Pool) KillAll() {
 	pool.mu.Lock()
 	pool.waitingProcesses = pool.waitingProcesses[:0]
-	// TODO: kill running processes.
+	pool.cancel()
+	pool.runningCpus = 0
+	close(pool.poller)
+	pool.waiterWg = &sync.WaitGroup{}
+	pool.workerWg = &sync.WaitGroup{}
 	pool.mu.Unlock()
 }

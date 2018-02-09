@@ -1,6 +1,10 @@
 package main
 
-import "github.com/brentp/go-athenaeum/shpool"
+import (
+	"time"
+
+	"github.com/brentp/go-athenaeum/shpool"
+)
 
 func main() {
 	opts := shpool.Options{LogPrefix: ""}
@@ -14,7 +18,7 @@ func main() {
 	p.Add(shpool.Process{Command: "ls -lh xxx", Prefix: "ls xxx"})
 	p.Add(shpool.Process{Command: "echo hello && sleep 6 && echo goodbye", Prefix: "sleep"})
 
-	//time.Sleep(1 * time.Second)
+	time.Sleep(1 * time.Second)
 
 	//p.KillAll()
 
