@@ -171,6 +171,7 @@ func (p *process) submit(pool *Pool) error {
 		}
 		p.c = exec.Command(Shell, "-c", Shell+" "+t.Name())
 	}
+	p.c.Env = os.Environ()
 	p.c.Env = append(p.c.Env, fmt.Sprintf("CPUs=%d", p.p.CPUs))
 	p.c.Env = append(p.c.Env, fmt.Sprintf("Prefix='%d'", p.p.Prefix))
 	p.c.Stderr = &prefixer{w: pool.logger, prefix: red("[E]" + p.p.Prefix)}
